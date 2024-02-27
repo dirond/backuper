@@ -1,0 +1,14 @@
+tested on debian 12 with Cinnamon
+
+0. Check backuper.cfg and backuperd.service files. Bring it in line.
+1. Copy directory to /usr/local/
+2. Add PATH
+3. chmod o+w for the next files:
+	./logs
+	./cfg
+	./cfg/data.list
+	./cfg/exclude.list
+	./cfg/backuper.cfg
+4. copy systemd unit file to /etc/systemd/system
+5. enable backuperd.service
+6. if running in system without gui, replace in service unit file graphical.target to multiuser.target

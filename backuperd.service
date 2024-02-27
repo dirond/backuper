@@ -1,0 +1,13 @@
+[Unit]
+Description=Simple-backuper script
+After=graphical.target
+
+[Service]
+Type=simple
+User=
+Group=
+ExecStart=/usr/local/bin/backuper/backuper
+Environment= "XDG_RUNTIME_DIR=/run/user/1000"
+
+[Install]
+WantedBy=graphical.target

@@ -1,0 +1,313 @@
+#!/bin/bash -e
+
+set o -pipefail
+
+cd "$(dirname "$0")"
+
+# ~~~~~~~~~~~~~~~~~~~Global variables~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#
+CFG_FILE=cfg/backuper.cfg
+grep -v '#' $(grep DATA_FILE $CFG_FILE | cut -d'=' -f 2) > cfg/.backuper_data
+grep -v '#' $(grep EXC_FILE  $CFG_FILE | cut -d'=' -f 2) > cfg/.backuper_exclude
+DATA_FILE=cfg/.backuper_data
+EXC_FILE=cfg/.backuper_exclude
+BACKUP_POSTFIX=$(grep BACKUP_POSTFIX  $CFG_FILE | cut -d'=' -f 2).tar.gz
+BACKUP_NAME=$(date +%d%m%g_%H%M)
+BACKUP_DIR=$(grep BACKUP_DIR  $CFG_FILE | cut -d'=' -f 2)
+LOG_DIR=$(grep LOG_DIR $CFG_FILE | cut -d'=' -f 2)
+TOKEN=$(grep TOKEN $CFG_FILE | cut -d '=' -f 2)
+SYMMETRIC_ENC=$(grep SYMMETRIC_ENC $CFG_FILE | cut -d'=' -f 2)
+GPG_EMAIL=$(grep GPG_EMAIL $CFG_FILE | cut -d'=' -f 2)
+CLOUD=$(grep CLOUD $CFG_FILE | cut -d'=' -f 2)
+GUI_NOTIFY=$(grep GUI_NOTIFY $CFG_FILE | cut -d'=' -f 2)
+#
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+function upload () {
+
+	local UPLOAD_FILE=$1
+	local LINK
+	local STATUS_LINK
+	local STATUS
+	
+	# Get link for upload
+	LINK=$(curl --connect-timeout 10 -X GET \
+				--header "Accept: application/json" \
+				--header "Authorization: OAuth $TOKEN" \
+				"https://cloud-api.yandex.net/v1/disk/resources/upload?path=backuper%2F$UPLOAD_FILE"  2> $LOG_DIR/error.log \
+			| jq '.href' | tr -d "\"")
+	
+	if [ -z ${LINK} ] ; 
+	then
+		log err "Error while uploading archive to disk.yandex.ru. Check Internet connection and $(dirname "$0")/logs/error.log file for more information" yes $GUI_NOTIFY
+		exit 1
+	fi
+	
+	# Upload file to temporary address recieved by previous request
+	STATUS=$(curl --connect-timeout 10 \
+				-s -o /dev/null \
+				-w "%{http_code}" \
+				-T $BACKUP_DIR/$UPLOAD_FILE \
+				--header "Authorization: OAuth $TOKEN" $LINK)
+	case ${STATUS} in 
+		201)
+			# Upload file to disk from temporary address
+			STATUS_LINK=$(curl --connect-timeout 10 -X POST \
+							--header "Content-Type: application/json" \
+							--header "Accept: application/json" \
+							--header "Authorization: OAuth $TOKEN" \
+							"https://cloud-api.yandex.net/v1/disk/resources/upload?path=backuper&url=$LINK" 2> $LOG_DIR/error.log \
+						| jq '.href' | tr -d "\"")
+			;;
+		*)
+			log err "Error while uploading archive to disk.yandex.ru. Check Internet connection and $(dirname "$0")/logs/error.log file for more information" yes $GUI_NOTIFY
+			exit 1
+		esac
+	if [ ! -z ${STATUS_LINK} ] ; then
+		#curl -w "%{http_code}" -X GET \
+		STATUS=$(curl --connect-timeout 10 -w "%{http_code}" -X GET \
+					--header "Accept: application/json" \
+					--header "Authorization: OAuth $TOKEN" \
+					$STATUS_LINK 2> $LOG_DIR/error.log)
+	fi
+	case $(cut -d'}' -f2 <<< ${STATUS}) in 
+		200)
+			log info "$BACKUP_DIR/$UPLOAD_FILE succsesfully uploaded!" yes $GUI_NOTIFY
+			;;
+		*)
+			log err "Error while uploading archive to disk.yandex.ru. Check Internet connection and $(dirname "$0")/logs/error.log file for more information" yes $GUI_NOTIFY
+			exit 1
+		esac
+# Upload files to yandex disk
+}
+
+
+function log() {
+	local type=$1
+	local message=$2
+
+	#local showlog
+	if [[ "$3" == yes ]]; then 
+		local showlog=true
+	else
+		local showlog=false
+	fi
+	#local shownotify
+	if [[ "$4" == yes ]]; then
+		local shownotify=true
+	else
+		local shownotify=false
+	fi
+
+	local t_stamp=$(date +%c)
+	local prefix
+	local color
+	local clear_color='\e[0m'
+	local urgency=low
+	local priority
+
+	# Describe message style
+	case $type in
+		warning)
+			prefix='[WARN]| '
+			color='\e[1;33m' # bold text yellow color
+			urgency=normal	 # urgency level for notify-send
+			priority=4 		 # priority level fot logger
+			;;
+		err)
+			prefix='[ERROR]| '
+			# bold text red color
+			color='\e[1;91m'
+			urgency=critical
+			priority=1
+			;;
+		info)
+			prefix='[INFO]| '
+			# regular text regular color
+			color='\e[0m'
+			urgency=low
+			priority=5
+			;;
+		substring_ignored)
+			prefix='        - '
+			color='\e[1;91m' # regular red color
+			type=info
+			unset t_stamp
+			priority=5
+			;;
+		substring_added)
+			prefix='        + '
+			color='\e[1;92m' # regular green color
+			type=info
+			unset t_stamp
+			priority=5
+			;;
+		*)
+			log err "Can't parse priority of message in logger function." yes $GUI_NOTIFY
+			exit 1
+	esac
+	# End of describing message style
+
+	# If run by systemd, write down logs only to system journal
+	if [ ! -z ${INVOCATION_ID} ]; then
+		#logger -p $priority -t "backuper" ${prefix}${message}
+		echo -e "${prefix} ${message}" 
+	else
+	# Also check need and show the logs in terminal 
+		if $showlog ; then
+			echo -e "${t_stamp} ${color}${prefix} ${message}${clear_color}"
+			logger -p $priority -t "backuper" ${prefix}${message} 
+		fi
+	fi
+	# Show notifications if needed
+	if $shownotify ; then
+		case $urgency in
+			critical)
+				notify-send -u $urgency "${message}"
+				;;
+			*)
+				notify-send -i media-floppy -u $urgency "${message}"
+		esac
+	fi
+# Logging events via logger
+}
+
+
+
+function files_checker () {
+	IFS=$'\n'
+	for f in $@; do
+		for r in $(cat $f); do
+			if ! compgen -G $r > /dev/null ; then 
+				log err "File or directory $r not exist. Check $f file." yes $GUI_NOTIFY
+				exit 1
+			fi
+		done
+	done
+	unset IFS
+# Check if files exist before call tar.
+}
+
+
+
+function backup () {
+
+	# Checking snar file and declare archive name
+	if [ -f  $BACKUP_DIR/backuper.snar ]; then
+		ARCHIVE_NUMBER=$(echo $(find $BACKUP_DIR -name *.tar.gz.gpg* | cut -d'-' -f2 | cut -d'.' -f1 | sort -gr | head -1 ) + 1 | bc)
+		log warning ".snar file found. An incremental backup #$ARCHIVE_NUMBER will be created" yes
+		ARCHIVE_NAME=$BACKUP_DIR/$BACKUP_NAME-$ARCHIVE_NUMBER.tar.gz
+	else
+		log warning ".snar file not found. A full backup will be created" yes
+		ARCHIVE_NUMBER=0
+		ARCHIVE_NAME=$BACKUP_DIR/$BACKUP_NAME-$ARCHIVE_NUMBER.tar.gz
+	fi
+
+	# Archive data using tar and gz
+	tar \
+	--totals \
+	--verbose \
+	--create \
+	--gzip \
+	--ignore-failed-read \
+	--file=$ARCHIVE_NAME \
+	--exclude-from=$EXC_FILE \
+	--listed-incremental=$BACKUP_DIR/backuper.snar \
+	--files-from=$DATA_FILE \
+	2> $LOG_DIR/error.log 1> $LOG_DIR/operation.log
+
+	#Check existing of created archive file
+	if ! compgen -G $ARCHIVE_NAME > /dev/null ; 
+	then 
+		log err "Some errors occured while backuper worked. Check $(dirname "$0")/logs/error.log file for more information" yes $GUI_NOTIFY
+		exit 1
+	else
+		log info "Backup file $ARCHIVE_NAME was successfully created!" yes GUI_NOTIFY
+		log info "Added $(cat $LOG_DIR/error.log | tail -1 | cut -d'(' -f 2 | cut -d' ' -f 1) of data" yes
+	fi
+# Call tar to backup files recieved by args.
+}
+
+
+#
+# MAIN PROGRAM
+#
+
+
+# Greeting
+log info "===Starting backuper service===" yes $GUI_NOTIFY
+
+# Call nm-online to check connection
+if [ "$CLOUD" == "yes" ]; then
+	log info "Checking connection to the disk.yandex.ru" yes $GUI_NOTIFY
+	if $(! nm-online -q -t 600); then
+		log err "Some errors occured while checking connection to cloud.yandex.ru. Check Internet connection" yes $GUI_NOTIFY
+		exit 1
+	fi
+fi
+# Checking existing files from data.list and exclude.list
+
+files_checker $DATA_FILE $EXC_FILE
+
+# Information about files witch be added or ignored
+IFS=$'\n' # Temporary reassign IFS for correct handle lines with spaces
+
+# Messages to system journal
+log info "Next files will be backuped:" yes 
+for dir in $(cat $DATA_FILE); do
+	log substring_added $dir yes
+done
+
+log info "Next files will be ignored:" yes 
+for dir in $(cat $EXC_FILE | grep -v '#'); do
+	log substring_ignored $dir yes
+done
+
+unset IFS
+
+# Call backup function
+backup
+
+# Call gpg for encrypt archive
+case $SYMMETRIC_ENC in
+	no)
+		gpg --always-trust -r $GPG_EMAIL --encrypt-files $ARCHIVE_NAME
+		;;
+	*)
+		gpg --symmetric $ARCHIVE_NAME
+		;;
+esac
+
+# Check existing of created encrypted file
+if ! compgen -G $ARCHIVE_NAME.gpg > /dev/null ; 
+then 
+	log err "Some errors occured while encrypt $ARCHIVE_NAME. Check journalctl -u backupd.service records" yes $GUI_NOTIFY
+	exit 1
+else
+	rm $ARCHIVE_NAME
+	case $SYMMETRIC_ENC in
+		no)
+			log info "$ARCHIVE_NAME encrypted by $GPG_EMAIL public key." yes $GUI_NOTIFY
+			;;
+		*)
+			log info "$ARCHIVE_NAME encrypted via password." yes $GUI_NOTIFY
+			;;
+	esac
+fi
+
+# Upload files
+case $CLOUD in
+	yes)
+		upload $BACKUP_NAME-$ARCHIVE_NUMBER.tar.gz.gpg
+		;;
+	*)
+		log info "$ARCHIVE_NAME.gpg stored in $BACKUP_DIR" yes GUI_NOTIFY
+		;;
+esac
+
+log info "===End of backuper service session===" yes $GUI_NOTIFY
+
+#291365530235416bb346ae0286a9375e
+
+#Authorization: OAuth y0_AgAAAAARmHlhAAtNyQAAAAD7PPvtAAArw-SEo9NJ-YXOJmb1TPwTLxNv2w
+

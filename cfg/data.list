@@ -1,0 +1,10 @@
+#----------------backuper.sh config file---------------------
+#
+#
+# List of directories and files (one per line) that will be archived
+# Try to avoid mistakes via writing files or directories here
+# If you want to shadow some file, just add # before them
+# 
+#
+#------------------------------------------------------------
+

@@ -1,0 +1,9 @@
+#----------------backuper.sh config file---------------------
+#
+#
+# List of exluded directories and files one per line
+# Try to avoid mistakes via writing files or directories here
+# If you want to shadow some file, just add # before them 
+# 
+#
+#------------------------------------------------------------

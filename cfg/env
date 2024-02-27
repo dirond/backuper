@@ -1,0 +1,11 @@
+#!/bin/sh
+# backuper shell setup
+# affix colons on either side of $PATH to simplify matching
+case ":${PATH}:" in
+    *:"$HOME/bin/backuper":*)
+        ;;
+    *)
+        # Prepending path in case a system-installed rustc needs to be overridden
+        export PATH="$HOME/bin/backuper:$PATH"
+        ;;
+esac
